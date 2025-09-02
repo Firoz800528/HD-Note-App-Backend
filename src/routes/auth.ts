@@ -1,37 +1,31 @@
 import { Router } from 'express';
-import { z } from 'zod';
-import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
-import { OAuth2Client } from 'google-auth-library';
 import { Db } from 'mongodb';
+import jwt from 'jsonwebtoken';
+import bcrypt from 'bcryptjs';
+import { z } from 'zod';
+import { OAuth2Client } from 'google-auth-library';
 import { sendOtpMail } from '../utils/mailer';
 
 const router = Router();
+const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 // Schemas
 const otpSchema = z.object({ email: z.string().email() });
 const verifySchema = z.object({
   email: z.string().email(),
-  code: z.string().min(4).max(6),
-  name: z.string().min(1).optional(),
+  code: z.string().min(6).max(6),
+  name: z.string().optional(),
 });
 
-// JWT token issuance
+// Issue JWT token
 function issueToken(user: any, res: any) {
-  const token = jwt.sign(
-    { email: user.email },
-    process.env.JWT_SECRET as string,
-    { subject: user._id.toString(), expiresIn: '7d' }
-  );
-
-  const secure = (process.env.COOKIE_SECURE || 'false') === 'true';
-  res.cookie('token', token, {
-    httpOnly: true,
-    sameSite: 'lax',
-    secure,
-    maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+  const token = jwt.sign({ email: user.email }, process.env.JWT_SECRET as string, {
+    subject: user._id.toString(),
+    expiresIn: '7d',
   });
 
+  const secure = (process.env.COOKIE_SECURE || 'false') === 'true';
+  res.cookie('token', token, { httpOnly: true, sameSite: 'lax', secure, maxAge: 7 * 24 * 60 * 60 * 1000 });
   return token;
 }
 
@@ -78,7 +72,6 @@ router.post('/verify-otp', async (req, res) => {
       return res.status(400).json({ message: 'Incorrect OTP' });
     }
 
-    // Check if user exists
     let user = await db.collection('users').findOne({ email });
     if (!user) {
       const result = await db.collection('users').insertOne({
@@ -108,46 +101,52 @@ router.post('/verify-otp', async (req, res) => {
 });
 
 // ========================
-// GOOGLE LOGIN
+// GOOGLE AUTH (without Firebase)
 // ========================
 router.post('/google', async (req, res) => {
   try {
     const db: Db = req.app.locals.db;
-    const idToken: string = req.body.idToken;
-    if (!idToken) return res.status(400).json({ message: 'Missing idToken' });
-
-    const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
-    let payload;
-
-    try {
-      const ticket = await client.verifyIdToken({
-        idToken,
-        audience: process.env.GOOGLE_CLIENT_ID,
-      });
-      payload = ticket.getPayload();
-      if (!payload) throw new Error('Invalid token payload');
-    } catch (err: any) {
-      return res.status(400).json({ message: 'Google token verification failed: ' + err.message });
+    const { token } = req.body;
+    
+    if (!token) {
+      return res.status(400).json({ message: 'Missing Google token' });
     }
 
-    const email = payload.email as string;
-    const sub = payload.sub as string;
-    const name = payload.name;
-    const picture = payload.picture;
+    // Verify the Google token
+    const ticket = await googleClient.verifyIdToken({
+      idToken: token,
+      audience: process.env.GOOGLE_CLIENT_ID,
+    });
 
+    const payload = ticket.getPayload();
+    
+    if (!payload || !payload.email) {
+      return res.status(400).json({ message: 'Invalid Google token' });
+    }
+
+    const { email, name, picture, sub: googleId } = payload;
+
+    // Check if user exists in DB
     let user = await db.collection('users').findOne({ email });
+    
     if (!user) {
+      // Create new user
       const result = await db.collection('users').insertOne({
+        googleId,
         email,
         name,
         avatar: picture,
         provider: 'google',
-        googleSub: sub,
+        createdAt: new Date(),
       });
-      user = { _id: result.insertedId, email, name, avatar: picture, provider: 'google' };
-    } else if (user.provider !== 'google') {
-      await db.collection('users').updateOne({ email }, { $set: { provider: 'google' } });
-      user.provider = 'google';
+      user = { 
+        _id: result.insertedId, 
+        googleId, 
+        email, 
+        name, 
+        avatar: picture, 
+        provider: 'google' 
+      };
     }
 
     issueToken(user, res);
@@ -161,8 +160,9 @@ router.post('/google', async (req, res) => {
         provider: user.provider,
       },
     });
-  } catch (e: any) {
-    res.status(400).json({ message: e.message || 'Google login failed' });
+  } catch (err: any) {
+    console.error('Google auth error:', err);
+    res.status(400).json({ message: err.message || 'Google authentication failed' });
   }
 });
 
