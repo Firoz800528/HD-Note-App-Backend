@@ -22,17 +22,17 @@ app.use(
   })
 );
 
-// Health check endpoint
+// Health check
 app.get('/api/health', (_req, res) =>
   res.json({ status: 'ok', time: new Date().toISOString() })
 );
 
-// Main async function to connect to MongoDB and start the server
 async function main() {
   try {
+    // Connect to MongoDB
     const client = new MongoClient(process.env.MONGO_URI as string);
     await client.connect();
-    const db: Db = client.db(); // default DB from URI
+    const db: Db = client.db();
     app.locals.db = db;
     console.log('MongoDB connected');
 
@@ -44,9 +44,14 @@ async function main() {
       res.json({ user: req.user });
     });
 
-    // Root
+    // Root route
     app.get('/', (_req, res) => {
       res.send('API is running');
+    });
+
+    // Catch-all for 404
+    app.use((_req, res) => {
+      res.status(404).json({ error: 'Route not found' });
     });
 
     const PORT = parseInt(process.env.PORT || '5174', 10);
@@ -57,5 +62,5 @@ async function main() {
   }
 }
 
-// Start the server
+// Start server
 main();
